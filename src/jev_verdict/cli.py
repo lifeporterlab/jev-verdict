@@ -38,15 +38,18 @@ def read_subject(args: argparse.Namespace) -> str:
     raise ValueError("one of --text or --file is required")
 
 
-def execute_gate(*, text: str, gate_name: str, gate_config: dict[str, Any], cache_path: Path,
+def execute_gate(*, text: str, gate_name: str, gate_config: dict[str, Any],
+                 cache_path: Path | None = None,
                  ledger_path: Path, ledger_salt: str, model: str = DEFAULT_MODEL,
-                 use_cache: bool = True, client: TypeSafeClient | None = None) -> GateResult:
+                 use_cache: bool = True, attempts: int = 3, env_file: str | None = None,
+                 client: TypeSafeClient | None = None) -> GateResult:
     questions = gate_config.get("question")
     question_list = questions if isinstance(questions, list) else []
     version = questions_fingerprint(question_list)
     key = cache_key(text, gate_name, version, model)
-    cache = VerdictCache(cache_path)
-    cached = cache.get(key, question_version=version, model=model) if use_cache and question_list else None
+    # No cache object (and therefore no cache directory) is created when caching is off.
+    cache = VerdictCache(cache_path or DEFAULT_CACHE) if use_cache else None
+    cached = cache.get(key, question_version=version, model=model) if cache is not None and question_list else None
     if cached is not None:
         result = apply_policy(
             gate_name, gate_config, text=text, scores=cached.get("scores"),
@@ -56,10 +59,10 @@ def execute_gate(*, text: str, gate_name: str, gate_config: dict[str, Any], cach
     elif not text.strip() or not question_list or gate_config.get("enabled", True) is not True:
         result = apply_policy(gate_name, gate_config, text=text, scores=None)
     else:
-        judge = client or TypeSafeClient()
+        judge = client or TypeSafeClient(env_file=env_file, attempts=attempts)
         try:
             scores, typed_answers, model_id, latency_ms = judge.judge({"text": text}, question_list, model)
-            if use_cache:
+            if cache is not None:
                 cache.put(
                     key, question_version=version, model=model,
                     value={"scores": scores, "typed_answers": typed_answers, "model_id": model_id, "latency_ms": latency_ms},
@@ -111,6 +114,16 @@ def add_io_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     parser.add_argument("--ledger-salt", default="")
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--env-file", default=None,
+        help="read TYPESAFE_API_KEY from this file only; the file is used as given and "
+             "no other directory is searched",
+    )
+    parser.add_argument(
+        "--attempts", type=int, default=3,
+        help="attempts per gate call, default 3; HTTP 429/5xx responses and transient "
+             "connection failures are retried, other HTTP statuses stop immediately",
+    )
     parser.add_argument("--json", action="store_true")
 
 
@@ -138,11 +151,29 @@ def build_parser() -> argparse.ArgumentParser:
     stability.add_argument("--ledger", default=str(DEFAULT_LEDGER))
     stability.add_argument("--ledger-salt", default="")
     stability.add_argument("--model", default=DEFAULT_MODEL)
+    stability.add_argument(
+        "--env-file", default=None,
+        help="read TYPESAFE_API_KEY from this file only; the file is used as given and "
+             "no other directory is searched",
+    )
+    stability.add_argument(
+        "--attempts", type=int, default=3,
+        help="attempts per gate call, default 3; HTTP 429/5xx responses and transient "
+             "connection failures are retried, other HTTP statuses stop immediately",
+    )
     stability.add_argument("--json", action="store_true")
 
-    cache = sub.add_parser("cache", help="cache reporting")
-    cache.add_argument("--stats", action="store_true", required=True)
+    cache = sub.add_parser("cache", help="cache reporting and compaction")
+    cache_view = cache.add_mutually_exclusive_group(required=True)
+    cache_view.add_argument("--stats", action="store_true", help="report ledger-derived cache statistics")
+    cache_view.add_argument("--prune", action="store_true",
+                            help="compact the verdict cache file to one record per key, keeping the newest")
+    cache.add_argument("--cache-file", default=str(DEFAULT_CACHE))
     cache.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    cache.add_argument(
+        "--env-file", default=None,
+        help="accepted for interface consistency; cache reporting does not read the API key",
+    )
     cache.add_argument("--json", action="store_true")
     return parser
 
@@ -155,7 +186,7 @@ def command_run(args: argparse.Namespace) -> int:
     result = execute_gate(
         text=text, gate_name=args.gate, gate_config=gates[args.gate],
         cache_path=Path(args.cache_file), ledger_path=Path(args.ledger), ledger_salt=args.ledger_salt,
-        model=args.model,
+        model=args.model, attempts=check_attempts(args.attempts), env_file=args.env_file,
     )
     _print(result.to_dict(), json_mode=args.json)
     return EXIT_CODES[result.decision]
@@ -164,10 +195,12 @@ def command_run(args: argparse.Namespace) -> int:
 def command_check(args: argparse.Namespace) -> int:
     gates = load_config(args.config)
     text = read_subject(args)
+    attempts = check_attempts(args.attempts)
     results = [
         execute_gate(
             text=text, gate_name=name, gate_config=config, cache_path=Path(args.cache_file),
             ledger_path=Path(args.ledger), ledger_salt=args.ledger_salt, model=args.model,
+            attempts=attempts, env_file=args.env_file,
         )
         for name, config in gates.items()
     ]
@@ -185,6 +218,7 @@ def command_why(args: argparse.Namespace) -> int:
 def command_stability(args: argparse.Namespace) -> int:
     if args.repeat < 1:
         raise ValueError("--repeat must be at least 1")
+    attempts = check_attempts(args.attempts)
     gates = load_config(args.config)
     rows = []
     with Path(args.fixtures).open("r", encoding="utf-8") as handle:
@@ -199,8 +233,8 @@ def command_stability(args: argparse.Namespace) -> int:
             for _ in range(args.repeat):
                 result = execute_gate(
                     text=str(item["text"]), gate_name=gate_name, gate_config=gates[gate_name],
-                    cache_path=Path(".jev-verdict/stability-unused-cache.jsonl"), ledger_path=Path(args.ledger),
-                    ledger_salt=args.ledger_salt, model=args.model, use_cache=False,
+                    ledger_path=Path(args.ledger), ledger_salt=args.ledger_salt, model=args.model,
+                    use_cache=False, attempts=attempts, env_file=args.env_file,
                 )
                 runs.append(result.to_dict())
             summary = summarize_runs(runs)
@@ -217,7 +251,16 @@ def command_stability(args: argparse.Namespace) -> int:
     return 2 if has_error else 0
 
 
+def check_attempts(value: int) -> int:
+    if int(value) < 1:
+        raise ValueError("--attempts must be at least 1")
+    return int(value)
+
+
 def command_cache(args: argparse.Namespace) -> int:
+    if args.prune:
+        _print(VerdictCache(args.cache_file).prune(), json_mode=args.json)
+        return 0
     stats = Ledger(args.ledger).cache_stats()
     _print(stats, json_mode=args.json)
     return 0

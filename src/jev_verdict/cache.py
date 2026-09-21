@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -65,6 +67,41 @@ class VerdictCache:
         record = {"key": key, "question_version": question_version, "model": model, "value": value}
         with self.path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(canonical_json(record) + "\n")
+
+    def prune(self) -> dict[str, int]:
+        """Compact the append-only file to one record per key, keeping the newest.
+
+        ``get`` scans newest to oldest and the newest record for a key always
+        decides the outcome, so keeping only that record is behaviour-preserving.
+        Returns {"before", "after", "removed"}; the file is only replaced when
+        something is actually dropped.
+        """
+        records = self._records()
+        before = len(records)
+        newest_by_key: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for index, record in enumerate(records):
+            key = str(record.get("key") or f"\0unkeyed:{index}")
+            if key not in newest_by_key:
+                order.append(key)
+            newest_by_key[key] = record
+        kept = [newest_by_key[key] for key in order]
+        after = len(kept)
+        if after == before:
+            return {"before": before, "after": after, "removed": 0}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle, temp_name = tempfile.mkstemp(dir=str(self.path.parent), prefix=".cache-prune-", text=True)
+        os.close(handle)
+        temp_path = Path(temp_name)
+        try:
+            with temp_path.open("w", encoding="utf-8", newline="\n") as stream:
+                for record in kept:
+                    stream.write(canonical_json(record) + "\n")
+            os.replace(temp_path, self.path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+        return {"before": before, "after": after, "removed": before - after}
 
     def stats(self) -> dict[str, int | float]:
         records = self._records()

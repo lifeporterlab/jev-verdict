@@ -19,34 +19,69 @@ class JevError(RuntimeError):
     pass
 
 
-def load_api_key() -> str:
+DEFAULT_ENV_FILE_NAME = ".env"
+CONFIG_SUBDIR = Path(".config") / "jev-verdict"
+
+
+def _read_key_from_file(path: Path) -> str:
+    """Return TYPESAFE_API_KEY from a dotenv-style file, or '' if absent."""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, raw = stripped.split("=", 1)
+        if name.strip() == "TYPESAFE_API_KEY":
+            return raw.strip().strip("\"'")
+    return ""
+
+
+def key_source_candidates(env_file: str | Path | None = None) -> list[Path]:
+    """Returns the only files key resolution may read, in priority order.
+
+    Exposed for tests: the set is a feature, not an implementation detail.
+    """
+    candidates: list[Path] = []
+    if env_file is not None and str(env_file).strip():
+        candidates.append(Path(env_file))
+    candidates.append(Path.cwd() / DEFAULT_ENV_FILE_NAME)
+    candidates.append(Path.home() / CONFIG_SUBDIR / DEFAULT_ENV_FILE_NAME)
+    return candidates
+
+
+def load_api_key(env_file: str | Path | None = None) -> str:
+    """Resolve the API key from a deliberately narrow set of locations.
+
+    Resolution order, and nothing else:
+
+    1. the ``TYPESAFE_API_KEY`` environment variable
+    2. the file named by ``--env-file`` (that file only)
+    3. ``./.env`` in the current working directory (no parent-directory walk)
+    4. ``~/.config/jev-verdict/.env`` (this tool's own configuration path)
+
+    Key resolution is deliberately narrow: the environment, a file the caller
+    explicitly points at, and this tool's own config path. We never read other
+    applications' configuration or credential stores.
+
+    When no key is found this returns an empty string; it never reports which
+    paths were inspected.
+    """
     value = os.environ.get("TYPESAFE_API_KEY", "").strip()
     if value:
         return value
-    candidates = [Path.cwd() / ".env"]
-    candidates.extend(parent / ".env" for parent in Path.cwd().parents)
-    candidates.extend([
-        Path.home() / ".env",
-        Path.home() / "AppData" / "Local" / "hermes" / ".env",
-        Path.home() / "AppData" / "Local" / "hermes" / "cache" / "scratch" / ".env",
-        Path.home() / "AppData" / "Local" / "hermes" / "profiles" / "developer" / ".env",
-    ])
     seen: set[Path] = set()
-    for path in candidates:
-        if path in seen or not path.is_file():
+    for path in key_source_candidates(env_file):
+        if path in seen:
             continue
         seen.add(path)
-        try:
-            lines = path.read_text(encoding="utf-8-sig").splitlines()
-        except OSError:
+        if not path.is_file():
             continue
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            name, raw = stripped.split("=", 1)
-            if name.strip() == "TYPESAFE_API_KEY":
-                return raw.strip().strip("\"'")
+        found = _read_key_from_file(path)
+        if found:
+            return found
     return ""
 
 
@@ -111,9 +146,12 @@ def parse_answers(response: Any, questions: list[dict[str, Any]]) -> tuple[dict[
 
 
 class TypeSafeClient:
-    def __init__(self, *, api_key: str = "", endpoint: str = DEFAULT_ENDPOINT, timeout: float = 15.0,
+    def __init__(self, *, api_key: str = "", env_file: str | Path | None = None,
+                 endpoint: str = DEFAULT_ENDPOINT, timeout: float = 15.0,
                  attempts: int = 3, sleeper: Callable[[float], None] = time.sleep):
-        self.api_key = api_key or load_api_key()
+        if attempts < 1:
+            raise JevError("attempts must be at least 1")
+        self.api_key = api_key or load_api_key(env_file)
         self.endpoint = endpoint
         self.timeout = timeout
         self.attempts = attempts
