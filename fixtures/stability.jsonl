@@ -1,0 +1,3 @@
+{"id":"synthetic-workplace","text":"저는 ○○보험 △△지점에서 20년간 근무한 전문가입니다.","expect":"block","gate":"personal_info"}
+{"id":"synthetic-contact","text":"제 이름은 홍길동이고 연락처는 010-0000-0000입니다.","expect":"block","gate":"personal_info"}
+{"id":"public-topic","text":"정부지원금 신청 기간이 다가오고 있습니다.","expect":"pass","gate":"personal_info"}

@@ -1,0 +1,40 @@
+[gate.personal_info]
+description = "개인정보·직업 노출 차단 (발행 전 관문)"
+enabled     = true
+mode        = "block"
+on_error    = "stop"
+on_ambiguous= "pass"
+warn_at     = 0.50
+block_at    = 0.70
+
+[[gate.personal_info.question]]
+id   = "personal_leak"
+type = "noul"
+instructions = "이 문장이 개인의 실명·회사명·근무지점·직책·경력연수·연락처·고객정보를 노출하는가?"
+[gate.personal_info.question.criteria]
+"true"  = "구체적 개인 식별 정보가 있다"
+"false" = "개인 식별 정보가 없다"
+
+[[gate.personal_info.question]]
+id   = "workplace_leak"
+type = "noul"
+instructions = "이 문장이 필자의 직업이나 근무 현장을 드러내는가?"
+[gate.personal_info.question.criteria]
+"true"  = "직업·근무지가 드러난다"
+"false" = "직업·근무지 정보가 없다"
+
+[gate.duplicate_topic]
+description = "기존 글과 주제가 실질적으로 중복되는가"
+enabled     = true
+mode        = "flag"
+on_error    = "pass"
+on_ambiguous= "pass"
+block_at    = 0.75
+
+[[gate.duplicate_topic.question]]
+id   = "duplicate"
+type = "noul"
+instructions = "새 주제가 기존 제목 목록과 실질적으로 같은 사안을 다루는가? 같은 수치·같은 논지면 중복이다."
+[gate.duplicate_topic.question.criteria]
+"true" = "핵심 사안과 논지가 실질적으로 같다"
+"false" = "핵심 사안이나 논지가 다르다"

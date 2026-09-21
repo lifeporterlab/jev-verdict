@@ -1,0 +1,6 @@
+.jev-verdict/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
